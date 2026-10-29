@@ -836,6 +836,7 @@ ru:{
  si_shop_t:"Магазин", si_shop_b:"Всё покупается за росу 💧: генераторы, бустеры, энергия, сундуки. Рядом с ценой всегда есть бесплатный rewarded-путь.",
  rew_left:"Осталось сегодня: {n}", inter_note:"Реклама показывается только между зонами",
  ad_sim:"(без SDK — реклама симулируется)",
+ ad_unavailable:"Реклама недоступна — награда выдана",
  why_dew:"Почему роса?", empty_creatures:"Пока пусто. Сливай предметы, чтобы оживлять существ!",
  empty_quests:"Все квесты выполнены! Загляни завтра.",
  need_zone:"Нужна зона «{z}»", need_line:"Собери предмет линии «{l}» {t} ур.",
@@ -947,6 +948,7 @@ en:{
  si_shop_t:"Shop", si_shop_b:"Everything is bought with dew 💧: generators, boosters, energy, chests. A free rewarded path sits next to every price.",
  rew_left:"Left today: {n}", inter_note:"Ads only appear between zones",
  ad_sim:"(no SDK — ad simulated)",
+ ad_unavailable:"Ad unavailable — reward granted anyway",
  why_dew:"Why dew?", empty_creatures:"Nothing here yet. Merge items to revive creatures!",
  empty_quests:"All quests done! Come back tomorrow.",
  need_zone:"Requires zone “{z}”", need_line:"Get a tier {t} “{l}” item",
@@ -2528,22 +2530,38 @@ VK.gameStart=function(){ return send('VKWebAppGameStart').catch(function(){ retu
 VK.gameStop=function(){ return send('VKWebAppGameStop').catch(function(){}); };
 VK.gameplayStart=function(){ VK.gameplay=true; return send('VKWebAppGameplayStart').catch(function(){}); };
 VK.gameplayStop=function(){ if(VK.gameplay===false) return Promise.resolve(); VK.gameplay=false; return send('VKWebAppGameplayStop').catch(function(){}); };
-VK.setLoadingProgress=function(p){ try{ send('VKWebAppSetViewSettings'&&'VKWebAppTrackEvent',{progress:p}); }catch(e){} };
+/* F18 fix: VK has no bridge method for loading progress — the platform shows its
+   own loader until VKWebAppGameReady. Kept as a no-op for call-site compat. */
+VK.setLoadingProgress=function(p){};
 
 /* ------------------------------------------------------------------ */
 /* ads                                                                 */
 /* ------------------------------------------------------------------ */
-var ADS_AVAILABLE=null;
-function adsAvailable(){
-  if(ADS_AVAILABLE!==null) return Promise.resolve(ADS_AVAILABLE);
-  return send('VKWebAppIsAdAvailable').then(function(r){
-    ADS_AVAILABLE=!!(r&&r.result); return ADS_AVAILABLE;
-  }).catch(function(){
-    /* older bridges: assume available, real failure handled per-call */
-    ADS_AVAILABLE=!!bridge(); return ADS_AVAILABLE;
+/* F20 — official VK Bridge ads API, verified against the type definitions of
+   @vkontakte/vk-bridge@2.15 (dist/types/src/types/data.d.ts):
+     VKWebAppCheckNativeAds {ad_format:'reward'|'interstitial'} → {result:boolean}
+     VKWebAppShowNativeAds  {ad_format:'reward'|'interstitial'} → {result:true}
+     failure event: VKWebAppShowNativeAdsFailed
+   NOTE: earlier builds called rewarded/interstitial method names that DO NOT
+   EXIST in vk-bridge — the bridge rejected every call and ads never played. (F20) */
+var ADS_OK={reward:false,interstitial:false};
+function adsAvailable(fmt){
+  fmt=(fmt==='interstitial')?'interstitial':'reward';
+  if(!VK.isInVK()||!bridge()) return Promise.resolve(false);
+  if(ADS_OK[fmt]) return Promise.resolve(true);           /* cache positive only */
+  return send('VKWebAppCheckNativeAds',{ad_format:fmt}).then(function(r){
+    var ok=!!(r&&r.result);
+    if(ok) ADS_OK[fmt]=true;
+    VK.log.push('[ads] check '+fmt+' → '+ok);
+    return ok;
+  }).catch(function(err){
+    /* unknown/unsupported check → don't block: the show call decides honestly */
+    VK.log.push('[ads] check '+fmt+' rejected: '+((err&&(err.error_type||err.error_msg))||'err'));
+    return undefined;
   });
 }
 VK.adsAvailable=adsAvailable;
+VK.adAvailable=adsAvailable;   /* alias — both spellings appear in call sites */
 
 /* Rewarded video.
    Resolves TRUE  → ad watched, grant the reward
@@ -2566,26 +2584,43 @@ function showRewarded(id,timeoutMs){
   }
   return new Promise(function(resolve){
     res=resolve;
-    tmr=setTimeout(function(){ settle(true,'timeout-assume-shown'); },timeoutMs||25000);
+    tmr=setTimeout(function(){ settle(true,'timeout-assume-shown'); },timeoutMs||35000);
     handler=function(e){
       var d=e&&e.detail?e.detail:e;
       if(!d||!d.type) return;
-      if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ settle(true,'reward-event'); }
+      if(d.type==='VKWebAppShowNativeAdsResult'){ settle(true,'native-result'); }
+      else if(d.type==='VKWebAppShowNativeAdsFailed'){ settle(false,'native-failed'); }
+      /* legacy/alternate spellings some clients emit — harmless to keep: */
+      else if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ settle(true,'reward-event'); }
       else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ settle(false,'reward-failed'); }
     };
     if(b&&b.subscribe){ try{ b.subscribe(handler); }catch(e){} }
-    send('VKWebAppShowRewardedVideo',{id:id||''}).catch(function(err){
-      if(cancelled(err)) settle(false,'cancelled');
-      else settle(false,'show-failed:'+(err&&err.error_type));
+    /* pre-check fill; only a definitive {result:false} skips the show call */
+    adsAvailable('reward').then(function(ok){
+      if(ok===false){ settle(false,'check-no-fill'); return; }
+      send('VKWebAppShowNativeAds',{ad_format:'reward'})
+        .then(function(){ settle(true,'show-resolved'); })
+        .catch(function(err){
+          if(cancelled(err)) settle(false,'cancelled');
+          else settle(false,'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'));
+        });
     });
   });
 }
 VK.rewarded=showRewarded;
 
+/* Interstitial (ad_format:'interstitial').
+   Hard policy guards are enforced by Game.canInterstitial() — natural pauses only. */
 VK.interstitial=function(id){
-  /* hard policy guards are enforced by Game.canInterstitial() */
   if(!VK.isInVK()) return Promise.resolve(false);
-  return send('VKWebAppShowInterstitial',{id:id||''}).catch(function(){});
+  return adsAvailable('interstitial').then(function(ok){
+    if(ok===false){ VK.log.push('[inter:'+(id||'-')+'] check-no-fill'); return false; }
+    return send('VKWebAppShowNativeAds',{ad_format:'interstitial'}).then(function(){
+      VK.log.push('[inter:'+(id||'-')+'] shown'); return true;
+    }).catch(function(err){
+      VK.log.push('[inter:'+(id||'-')+'] failed:'+((err&&(err.error_type||err.error_msg))||'')); return false;
+    });
+  });
 };
 
 /* ------------------------------------------------------------------ */
@@ -3435,6 +3470,11 @@ Game.ads.watch=function(point,opts){
     if(dewGain) G.addDew(dewGain,'ad',{point:point});
     var S2=G.S(); S2.mt.ads=(S2.mt.ads||0)+1;
     Game.emit('adreward',{point:point,dew:dewGain,shown:shown,mul:opts.mul});
+    /* F20b — honesty: inside VK, if the ad didn't actually play (no fill /
+       offer not connected / rejected), say so; the reward is granted anyway (rule 5) */
+    if(!shown && window.VK.isInVK() && window.UI && UI.toast){
+      UI.toast(window.t('ad_unavailable'),2600);
+    }
     G.save();
     return {shown:shown,dew:dewGain};
   });
