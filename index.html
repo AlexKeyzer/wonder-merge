@@ -794,6 +794,7 @@ ru:{
  rew_granted:"Реклама просмотрена — награда выдана", rew_used:"Уже использовано сегодня",
  rew_quest2:"Удвоить награду квеста", qa_only:"Панель QA доступна только в QA-сборке (?qa=1)",
  rew_energy5:"+5 энергии сейчас", rew_boss2:"×2 награда кризиса",
+ menu_offline:"Забрать офлайн-доход",
  hook_offline:"Офлайн-доход заполнится через", hook_streak:"Завтра стрик станет", hook_fair:"Ярмарка начнётся через",
  consent_t:"Условия и согласие", consent_age:"0+",
  consent_b:"Игра обрабатывает игровой прогресс и данные профиля (имя, фото) для облачных сохранений и лидерборда друзей — подробности в политике конфиденциальности в описании приложения. Реклама только добровольная, доната нет. Нажимая «Принять», вы соглашаетесь с условиями.",
@@ -904,6 +905,7 @@ en:{
  rew_granted:"Ad watched — reward granted", rew_used:"Already used today",
  rew_quest2:"Double the quest reward", qa_only:"QA panel is available only in QA builds (?qa=1)",
  rew_energy5:"+5 energy now", rew_boss2:"×2 crisis reward",
+ menu_offline:"Claim offline income",
  hook_offline:"Offline income refills in", hook_streak:"Tomorrow streak becomes", hook_fair:"Fair starts in",
  consent_t:"Terms & consent", consent_age:"0+",
  consent_b:"The game processes your game progress and profile data (name, photo) for cloud saves and the friends leaderboard - see the privacy policy in the app description. Ads are optional only, there is no IAP. By tapping Accept you agree to the terms.",
@@ -5778,14 +5780,17 @@ UI.shareLegendaryPrompt=shareLegendaryPrompt;
 /* ====================== REWARDED POINT #1 — offline ×2 ====================== */
 UI.offlineModal=function(rep){
   if(!rep.dew&&rep.ms<60000) return;
+  /* F16: an unclaimed offline reward survives a modal dismiss (24 h shelf life) */
+  G.S().flags.offRep={dew:rep.dew,capped:rep.capped,cappedFlag:!!rep.cappedFlag,ms:rep.ms,perH:rep.perH||0,energy:rep.energy||0,at:Date.now()};
+  G.save();
   var claimed=false;
   var m=UI.modal({
     title:'🌙 '+window.t('offline'),
     sub:U.time(rep.capped)+(rep.cappedFlag?' · '+window.t('offline_cap'):''),
     body:'<div class="hero"><div class="art" style="width:120px">'+I.img('mo',I.dew())+'</div></div>'
       +'<div class="m-sub">'+window.t('offline_earned',{n:'<b id="offN">'+U.num(rep.dew)+'</b>',t:U.time(rep.capped)})+'</div>'
-      +'<div class="kv"><span>'+window.t('passive')+'</span><b>'+rep.perH.toFixed(0)+' 💧/'+(window.LANG==='ru'?'час':'h')+'</b></div>'
-      +'<div class="kv"><span>'+window.t('energy')+'</span><b>+'+rep.energy+' ⚡</b></div>'
+      +'<div class="kv"><span>'+window.t('passive')+'</span><b>'+(rep.perH||0).toFixed(0)+' 💧/'+(window.LANG==='ru'?'час':'h')+'</b></div>'
+      +'<div class="kv"><span>'+window.t('energy')+'</span><b>+'+(rep.energy||0)+' ⚡</b></div>'
       +UI.rewards([{type:'dew',n:rep.dew}]),
     note:'<b>Rewarded 1/6</b> · '+(window.LANG==='ru'
       ? 'Каждое возвращение: удвой офлайн-доход за просмотр рекламы и получи ещё '+ECO.rewDew.offline+' 💧 сверху.'
@@ -5799,7 +5804,7 @@ UI.offlineModal=function(rep){
         UI.showAdLoader(function(){
           Game.ads.watch('offline2x').then(function(){
             G.addDew(rep.dew+ECO.rewDew.offline,'offline2x');
-            G.S().flags.offlineShown=U.dayKey(); G.save();
+            G.S().flags.offlineShown=U.dayKey(); G.S().flags.offRep=null; G.save();
             AUDIO.sfx('quest'); FX.confetti(window.innerWidth/2,window.innerHeight*.42,40);
             UI.toast(window.t('doubled')+' +'+U.num(rep.dew+ECO.rewDew.offline)+' 💧','gold');
             UI.refresh({force:1});
@@ -5810,7 +5815,7 @@ UI.offlineModal=function(rep){
         if(claimed){ mm.close(); return; }
         claimed=true;
         G.addDew(rep.dew,'offline');
-        G.S().flags.offlineShown=U.dayKey(); G.save();
+        G.S().flags.offlineShown=U.dayKey(); G.S().flags.offRep=null; G.save();
         AUDIO.sfx('coin'); mm.close(); UI.refresh({force:1});
       }}
     ]});
@@ -6261,6 +6266,10 @@ UI.menu=function(){
    +'<div style="height:12px"></div>'
    +'<div style="width:min(94%,380px);display:flex;flex-direction:column;gap:9px">'
    +'<button class="pill big gold" id="mPlay" style="width:100%">'+window.t('tap_start')+' ▶</button>'
+   +(function(){ var or=S.flags.offRep;
+        if(!or||!or.dew||Date.now()-(or.at||0)>86400000) return '';
+        return '<button class="pill blue" id="mOff" style="width:100%">'+U.rich('💧')+' '
+          +window.t('menu_offline')+' (+'+U.num(or.dew)+')</button>'; })()
    +'<div style="display:flex;gap:8px">'
    +'<button class="pill ghost" id="mDaily" style="flex:1">🎁 '+window.t('nav_daily')+'</button>'
    +'<button class="pill ghost" id="mFr" style="flex:1">👥 '+window.t('nav_friends')+'</button>'
@@ -6283,6 +6292,13 @@ UI.menu=function(){
     else window.TUT.resume();
     e.style.animation='scrIn .3s reverse both';
     setTimeout(function(){ e.remove(); UI.go('merge'); VK.gameplayStart(); },180);
+  });
+  var mo=e.querySelector('#mOff');
+  if(mo) mo.addEventListener('click',function(){
+    AUDIO.unlock();
+    var or=G.S().flags.offRep;
+    e.remove();
+    if(or) UI.offlineModal({dew:or.dew,capped:or.capped,cappedFlag:or.cappedFlag,ms:or.ms,perH:or.perH||0,energy:or.energy||0});
   });
   e.querySelector('#mDaily').addEventListener('click',function(){ AUDIO.unlock(); e.remove(); UI._qtab='daily'; UI.go('quests'); });
   e.querySelector('#mFr').addEventListener('click',function(){ AUDIO.unlock(); e.remove(); UI.go('friends'); });
