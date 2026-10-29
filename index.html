@@ -838,6 +838,11 @@ ru:{
  ad_sim:"(без SDK — реклама симулируется)",
  ad_unavailable:"Реклама недоступна — награда выдана",
  ad_skipped:"📺 Видео закрыто раньше времени — награда не выдана. Попробуй ещё раз и досмотри до конца.",
+ ad_skipped_left:"📺 Видео закрыто рано — до награды не хватило {n} сек. В следующий раз досмотри до конца.",
+ ad_load:"Загружаем рекламу…",
+ ad_hint:"Досмотри видео до конца — до награды минимум {n} сек",
+ ad_count:"До награды: {n} сек",
+ ad_got:"Награда получена!",
  why_dew:"Почему роса?", empty_creatures:"Пока пусто. Сливай предметы, чтобы оживлять существ!",
  empty_quests:"Все квесты выполнены! Загляни завтра.",
  need_zone:"Нужна зона «{z}»", need_line:"Собери предмет линии «{l}» {t} ур.",
@@ -951,6 +956,11 @@ en:{
  ad_sim:"(no SDK — ad simulated)",
  ad_unavailable:"Ad unavailable — reward granted anyway",
  ad_skipped:"📺 Video closed too early — no reward. Try again and watch it to the end.",
+ ad_skipped_left:"📺 Closed too early — {n}s short of the reward. Watch to the end next time.",
+ ad_load:"Loading ad…",
+ ad_hint:"Watch to the end — at least {n}s until the reward",
+ ad_count:"Reward in {n}s",
+ ad_got:"Reward granted!",
  why_dew:"Why dew?", empty_creatures:"Nothing here yet. Merge items to revive creatures!",
  empty_quests:"All quests done! Come back tomorrow.",
  need_zone:"Requires zone “{z}”", need_line:"Get a tier {t} “{l}” item",
@@ -1100,8 +1110,10 @@ var ECO = {
   fairDouble:true, hardcoreMul:3, hardcoreMs:24*3600*1000,
   dailyRewards:[{dew:120},{dew:150},{chest:'c'}],
   /* F21: rewMinWatchMs — rewarded video counts as watched only if it was on
-     screen at least this long; closing the player earlier grants nothing */
-  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000, rewMinWatchMs:10000}
+     screen at least this long; closing the player earlier grants nothing.
+     F22: simWatchSec — outside VK the simulated ad shows a live "reward in
+     N s" countdown of this length before the fallback reward is granted */
+  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000, rewMinWatchMs:10000, simWatchSec:5}
 };
 
 /* ---------------- zones ---------------- */
@@ -2578,6 +2590,7 @@ function minWatchMs(){
   if(typeof VK.MIN_AD_WATCH_MS==='number') return VK.MIN_AD_WATCH_MS;   /* test hook */
   return (window.DATA&&DATA.ECO&&DATA.ECO.ad&&DATA.ECO.ad.rewMinWatchMs)||10000;
 }
+VK.minWatchMs=minWatchMs;   /* F22: UI needs the threshold for the countdown hint */
 function showRewarded(id,timeoutMs){
   VK.lastRewReason='';
   /* outside the VK environment there is no ad transport: resolve to the
@@ -3496,7 +3509,13 @@ Game.ads.watch=function(point,opts){
        fallback below, per rule 5: an SDK problem must never punish the player.) */
     if(!shown && /^(early-close|cancelled)/.test(why)){
       VK.log.push('[ads] '+point+' skipped ('+why+') → no reward');
-      if(window.UI&&UI.toast) UI.toast(window.t('ad_skipped'),2800);
+      if(window.UI&&UI.toast){
+        /* F22: tell the player exactly how many seconds were missing */
+        var mm=/early-close:(\d+)ms/.exec(why);
+        var minMs=(window.VK.minWatchMs?VK.minWatchMs():((ECO.ad&&ECO.ad.rewMinWatchMs)||10000));
+        var leftS=mm?Math.max(1,Math.ceil((minMs-(+mm[1]))/1000)):0;
+        UI.toast(leftS?window.t('ad_skipped_left',{n:leftS}):window.t('ad_skipped'),3200);
+      }
       if(window.AUDIO) AUDIO.sfx('bad');
       Game.emit('adskipped',{point:point,reason:why});
       return {shown:false,skipped:true,dew:0};
@@ -4553,17 +4572,59 @@ UI.energyModal=function(){
     ]
   });
 };
-/* ad loader shim — keeps UI honest when the SDK is missing/blocked */
+/* ad loader shim — keeps UI honest when the SDK is missing/blocked.
+   F22 — countdown "seconds left until the reward":
+   - outside VK (simulation): full-screen fake ad with a live N→0 counter,
+     progress bar and a 🎁 flash at the end, then the fallback reward;
+   - inside VK: the native player is VK client UI and covers the webview —
+     we cannot draw over it, so the loader warns the minimum watch time
+     up front ("at least N s until the reward") before handing over.
+   Test hook: UI.AD_SIM_SEC (seconds) overrides ECO.ad.simWatchSec. */
 UI.showAdLoader=function(cb){
+  var inVK=VK.isInVK();
+  var ad=(window.ECO&&ECO.ad)||{};
+  var minSec=Math.max(1,Math.round((VK.minWatchMs?VK.minWatchMs():(ad.rewMinWatchMs||10000))/1000));
+  var simSec=inVK?0:(typeof UI.AD_SIM_SEC==='number'?UI.AD_SIM_SEC:(ad.simWatchSec!=null?ad.simWatchSec:5));
   var e=document.createElement('div');
-  e.style.cssText='position:fixed;inset:0;z-index:250;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:rgba(8,20,12,.86);color:#dfffe6;font-weight:900';
-  e.innerHTML='<div style="width:64px;height:64px">'+I.img('adl',I.ad())+'</div><div>'+(window.LANG==='ru'?'Реклама…':'Loading ad…')+'</div>'
-    +(VK.isInVK()?'':'<div style="font-size:11px;opacity:.7;font-weight:700">'+window.t('ad_sim')+'</div>');
-  document.body.appendChild(e);
+  e.id='adLoader';
+  e.style.cssText='position:fixed;inset:0;z-index:250;display:flex;align-items:center;justify-content:center;flex-direction:column;gap:12px;background:rgba(8,20,12,.92);color:#dfffe6;font-weight:900;text-align:center;padding:24px';
   AUDIO.sfx('ad');
-  var done=false;
-  function fin(){ if(done)return; done=true; e.remove(); cb&&cb(); }
-  setTimeout(fin,VK.isInVK()?350:1200);
+  var done=false,tick=null;
+  function fin(){ if(done)return; done=true; if(tick){clearInterval(tick);tick=null;} e.remove(); cb&&cb(); }
+  if(!inVK&&simSec>0){
+    /* ---- simulated ad with live countdown (F22) ---- */
+    e.innerHTML='<div>'+I.img('adl',I.ad(),'',64)+'</div>'
+      +'<div style="font-size:11px;opacity:.7;font-weight:700">'+window.t('ad_sim')+'</div>'
+      +'<div id="adCountNum" style="font-size:72px;line-height:1;color:#ffd76a;text-shadow:0 2px 12px rgba(0,0,0,.5)">'+Math.ceil(simSec)+'</div>'
+      +'<div id="adCountLbl" style="font-size:15px">'+window.t('ad_count',{n:Math.ceil(simSec)})+'</div>'
+      +'<div style="width:min(260px,70vw);height:10px;border-radius:6px;background:rgba(255,255,255,.15);overflow:hidden">'
+      +'<div id="adCountBar" style="height:100%;width:0%;background:linear-gradient(90deg,#7ed957,#ffd76a);border-radius:6px"></div></div>';
+    document.body.appendChild(e);
+    var t0=Date.now(),total=simSec*1000;
+    tick=setInterval(function(){
+      var el=Date.now()-t0,left=Math.max(0,total-el);
+      var bar=document.getElementById('adCountBar');
+      if(bar) bar.style.width=Math.min(100,100*el/total)+'%';
+      if(left<=0){
+        if(tick){clearInterval(tick);tick=null;}
+        e.innerHTML='<div style="width:72px;height:72px">'+I.img('adg',I.gift(),'',72)+'</div><div style="font-size:20px;color:#ffd76a">'+window.t('ad_got')+'</div>';
+        AUDIO.sfx('achv');
+        setTimeout(fin,550);
+        return;
+      }
+      var s=Math.ceil(left/1000);
+      var num=document.getElementById('adCountNum'),lbl=document.getElementById('adCountLbl');
+      if(num) num.textContent=s;
+      if(lbl) lbl.textContent=window.t('ad_count',{n:s});
+    },100);
+  }else{
+    /* ---- inside VK (or sim disabled by test hook): short preloader + hint ---- */
+    e.innerHTML='<div>'+I.img('adl',I.ad(),'',64)+'</div><div>'+window.t('ad_load')+'</div>'
+      +(inVK?'<div style="font-size:12px;opacity:.75;font-weight:700;max-width:320px">'+window.t('ad_hint',{n:minSec})+'</div>'
+            :'<div style="font-size:11px;opacity:.7;font-weight:700">'+window.t('ad_sim')+'</div>');
+    document.body.appendChild(e);
+    setTimeout(fin,inVK?800:300);
+  }
 };
 
 /* ---------------- goal chip + onboarding handoff ---------------- */
