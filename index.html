@@ -227,13 +227,13 @@ b,strong{font-weight:900}
   background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Cpath d='M50 4C78 26 86 54 50 96C14 54 22 26 50 4Z' fill='%236aa84f' stroke='%2333241a' stroke-width='6'/%3E%3C/svg%3E") no-repeat center/contain;
   animation:amble linear infinite}
 @keyframes amble{0%{transform:translateY(-10vh) rotate(0deg)}50%{transform:translateY(45vh) translateX(26px) rotate(200deg)}100%{transform:translateY(105vh) rotate(420deg)}}
-#board{z-index:1}
+#comboBox,#gens,.goalchip{position:relative;z-index:2}
 @keyframes pop{0%{transform:scale(.2) rotate(-14deg)}60%{transform:scale(1.18) rotate(4deg)}100%{transform:scale(1)}}
 .itm.mergeout{animation:mout .22s ease-in both}
 @keyframes mout{to{transform:scale(.1) rotate(24deg);opacity:0}}
 .itm.idle{animation:idleb 3.2s ease-in-out infinite}
 @keyframes idleb{0%,100%{transform:translateY(0)}50%{transform:translateY(-3%)}}
-.lvltag{position:absolute;right:-3px;bottom:-3px;min-width:16px;height:16px;padding:0 3px;border-radius:99px;
+.lvltag{position:absolute;right:1px;bottom:1px;min-width:15px;height:15px;padding:0 3px;border-radius:99px;
   background:linear-gradient(180deg,#fbf3e2,#e4d3b0);border:2px solid var(--ink);
   font-size:9.5px;font-weight:900;color:var(--ink2);display:grid;place-items:center;line-height:1;
   box-shadow:0 2px 0 rgba(74,47,22,.45)}
@@ -4120,8 +4120,9 @@ function sizeBoard(){
   var wrap=document.getElementById('boardWrap');
   if(!wrap) return;
   var w=wrap.clientWidth-4, h=wrap.clientHeight-4;
-  var size=Math.floor((Math.min(w,h)-18-3*8)/9);
-  size=Math.max(26,Math.min(58,size));
+  /* exact CSS geometry: 9 cells + 8 gaps(4) + padding(12*2) + border(6*2) = 9*size+68 */
+  var size=Math.floor((Math.min(w,h)-68)/9);
+  size=Math.max(20,Math.min(58,size));
   document.documentElement.style.setProperty('--cell',size+'px');
   M.cell=size;
 }
