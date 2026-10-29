@@ -2449,9 +2449,19 @@ var VK={
 window.VK=VK;
 
 function bridge(){
+  /* vk-bridge UMD (2.15.x) exports a namespace: the instance lives on .default —
+     support every known shape so GameReady can never be lost again */
   try{
-    if(window.vkBridge&&window.vkBridge.send) return window.vkBridge;
-    if(window.VKBridge&&window.VKBridge.send) return window.VKBridge;
+    var cands=[window.vkBridge, window.VKBridge];
+    for(var i=0;i<cands.length;i++){
+      var b=cands[i];
+      if(!b) continue;
+      if(typeof b.send==='function') return b;
+      if(b.default&&typeof b.default.send==='function') return b.default;
+      if(b.vkBridge&&typeof b.vkBridge.send==='function') return b.vkBridge;
+      for(var k in b){ var v=b[k];
+        if(v&&typeof v.send==='function'&&typeof v.subscribe==='function') return v; }
+    }
   }catch(e){}
   return null;
 }
@@ -2538,6 +2548,12 @@ VK.adsAvailable=adsAvailable;
    Resolves FALSE → skipped / unavailable → grant the fallback (never blocks play)
    Handles both event styles: VKWebAppRewardResult / VKWebAppRewardedResult  */
 function showRewarded(id,timeoutMs){
+  /* outside the VK environment there is no ad transport: resolve to the
+     honest fallback immediately instead of leaving a pending self-post */
+  if(!VK.isInVK()){
+    VK.log.push('[rewarded:'+(id||'-')+'] no-vk-env → fallback');
+    return Promise.resolve(false);
+  }
   var b=bridge(), settled=false, res=null, tmr=null, handler=null;
   function settle(v,why){
     if(settled) return; settled=true;
@@ -2566,6 +2582,7 @@ VK.rewarded=showRewarded;
 
 VK.interstitial=function(id){
   /* hard policy guards are enforced by Game.canInterstitial() */
+  if(!VK.isInVK()) return Promise.resolve(false);
   return send('VKWebAppShowInterstitial',{id:id||''}).catch(function(){});
 };
 
@@ -2606,7 +2623,7 @@ VK.loadLocal=function(){
   try{ var s=localStorage.getItem(LS_KEY); return s?JSON.parse(s):null; }catch(e){ return null; }
 };
 VK.saveCloud=function(obj){
-  if(!bridge()) return Promise.resolve(false);
+  if(!VK.isInVK()) return Promise.resolve(false);
   /* prune volatile keys + unbounded maps so the payload stays small and valid */
   var o={},k;
   for(k in obj){ if(k.charAt(0)==='_') continue; o[k]=obj[k]; }
@@ -2624,7 +2641,7 @@ VK.saveCloud=function(obj){
   return send('VKWebAppSetUserData',{key:'player',value:payload}).then(function(){ return true; }).catch(function(){ return false; });
 };
 VK.loadCloud=function(){
-  if(!bridge()) return Promise.resolve(null);
+  if(!VK.isInVK()) return Promise.resolve(null);
   return send('VKWebAppGetUserData',{key:'player'}).then(function(r){
     if(r&&typeof r.value==='string'&&r.value){ try{ var o=JSON.parse(r.value); return (o&&o.deleted)?null:o; }catch(e){ return null; } }
     if(r&&r.player&&typeof r.player==='string'){ try{ return JSON.parse(r.player); }catch(e){ return null; } }
@@ -6476,7 +6493,7 @@ function waitBridge(ms){
     (function poll(){
       if(window.__vkBridgeBlocked) return res(false);
       var b=window.vkBridge||window.VKBridge;
-      if(b&&b.send) return res(true);
+      if(b&&(b.send||(b.default&&b.default.send))) return res(true);
       if(Date.now()-t0>ms) return res(false);
       setTimeout(poll,60);
     })();
