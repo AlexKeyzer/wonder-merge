@@ -843,6 +843,7 @@ ru:{
  ad_hint:"Досмотри видео до конца — до награды минимум {n} сек",
  ad_count:"До награды: {n} сек",
  ad_got:"Награда получена!",
+ ad_can_close:"Можно закрывать — награда ваша!",
  why_dew:"Почему роса?", empty_creatures:"Пока пусто. Сливай предметы, чтобы оживлять существ!",
  empty_quests:"Все квесты выполнены! Загляни завтра.",
  need_zone:"Нужна зона «{z}»", need_line:"Собери предмет линии «{l}» {t} ур.",
@@ -961,6 +962,7 @@ en:{
  ad_hint:"Watch to the end — at least {n}s until the reward",
  ad_count:"Reward in {n}s",
  ad_got:"Reward granted!",
+ ad_can_close:"You can close now — the reward is yours!",
  why_dew:"Why dew?", empty_creatures:"Nothing here yet. Merge items to revive creatures!",
  empty_quests:"All quests done! Come back tomorrow.",
  need_zone:"Requires zone “{z}”", need_line:"Get a tier {t} “{l}” item",
@@ -2605,6 +2607,7 @@ function showRewarded(id,timeoutMs){
   function settle(v,why){
     if(settled) return; settled=true;
     VK.lastRewReason=why||'';
+    if(window.UI&&UI.hideAdLiveTimer) UI.hideAdLiveTimer();   /* F23: drop the live pill on every exit path */
     if(tmr) clearTimeout(tmr);
     if(handler&&b&&b.unsubscribe) { try{b.unsubscribe(handler);}catch(e){} }
     VK.log.push('[rewarded:'+(id||'-')+'] '+(v?'granted':'fallback')+' '+(why||''));
@@ -2636,6 +2639,7 @@ function showRewarded(id,timeoutMs){
     adsAvailable('reward').then(function(ok){
       if(ok===false){ settle(false,'check-no-fill'); return; }
       t0=Date.now();   /* measure watch time from the actual show call */
+      if(window.UI&&UI.showAdLiveTimer) UI.showAdLiveTimer();   /* F23: seconds-on-screen while the video plays */
       send('VKWebAppShowNativeAds',{ad_format:'reward'})
         .then(function(){ watched('show-resolved'); })
         .catch(function(err){
@@ -4619,12 +4623,62 @@ UI.showAdLoader=function(cb){
     },100);
   }else{
     /* ---- inside VK (or sim disabled by test hook): short preloader + hint ---- */
+    /* F23: the pre-hint now leads with the big number itself (not only text)
+       and lives 1500ms so the player actually registers it before handoff. */
     e.innerHTML='<div>'+I.img('adl',I.ad(),'',64)+'</div><div>'+window.t('ad_load')+'</div>'
-      +(inVK?'<div style="font-size:12px;opacity:.75;font-weight:700;max-width:320px">'+window.t('ad_hint',{n:minSec})+'</div>'
+      +(inVK?'<div id="adPreNum" style="font-size:56px;line-height:1;color:#ffd76a;text-shadow:0 2px 12px rgba(0,0,0,.5)">'+minSec+'</div>'
+            +'<div style="font-size:12px;opacity:.75;font-weight:700;max-width:320px">'+window.t('ad_hint',{n:minSec})+'</div>'
             :'<div style="font-size:11px;opacity:.7;font-weight:700">'+window.t('ad_sim')+'</div>');
     document.body.appendChild(e);
-    setTimeout(fin,inVK?800:300);
+    setTimeout(fin,inVK?1500:300);
   }
+};
+
+/* F23 — LIVE countdown pill that stays ON SCREEN for the whole ad video.
+   Why: inside VK the native player is VK client UI. On VK web (desktop /
+   mobile browser) its modal covers only the middle of the webview, so a thin
+   pill pinned to the TOP edge of our document remains visible during the
+   entire video (verified against a real VK web ad screenshot). On mobile
+   native the player is fullscreen and nothing can overlay it — there the
+   pre-hint above (F23 big number) and the early-close toast (F22) carry the
+   same seconds, plus this pill is already running underneath.
+   Lifecycle: VK.showRewarded() starts it right before VKWebAppShowNativeAds
+   and stops it in settle() (result / failed / timeout / cancel — all paths).
+   Counts minWatchMs→0, then flips to the green "you may close now" state. */
+var liveT=null;
+UI.showAdLiveTimer=function(){
+  UI.hideAdLiveTimer();
+  var minMs=(VK.minWatchMs?VK.minWatchMs():(((window.ECO&&ECO.ad)||{}).rewMinWatchMs||10000));
+  var total=Math.max(1,Math.round(minMs/1000))*1000;
+  var t0=Date.now(), switched=false;
+  var e=document.createElement('div');
+  e.id='adLiveTimer';
+  e.style.cssText='position:fixed;top:8px;left:50%;transform:translateX(-50%);z-index:2147483647;display:flex;align-items:center;gap:10px;padding:8px 18px;border-radius:999px;background:rgba(10,14,8,.88);border:1px solid rgba(255,215,106,.55);color:#ffd76a;font-weight:900;pointer-events:none;box-shadow:0 4px 18px rgba(0,0,0,.45);font-family:inherit';
+  e.innerHTML='<span id="adLiveNum" style="font-size:26px;line-height:1;min-width:34px;text-align:center">'+Math.ceil(total/1000)+'</span>'
+    +'<span id="adLiveLbl" style="font-size:13px;color:#dfffe6;font-weight:700">'+window.t('ad_count',{n:Math.ceil(total/1000)})+'</span>';
+  document.body.appendChild(e);
+  liveT=setInterval(function(){
+    var left=total-(Date.now()-t0);
+    if(left<=0){
+      if(!switched){
+        switched=true;
+        e.style.borderColor='rgba(126,217,87,.75)';
+        e.style.background='rgba(14,40,18,.92)';
+        e.innerHTML='<span style="width:26px;height:26px;display:inline-block">'+I.img('adlg',I.gift(),'',26)+'</span>'
+          +'<span style="font-size:14px;color:#7ed957;font-weight:900">'+window.t('ad_can_close')+'</span>';
+      }
+      return;
+    }
+    var s=Math.ceil(left/1000);
+    var num=document.getElementById('adLiveNum'),lbl=document.getElementById('adLiveLbl');
+    if(num) num.textContent=s;
+    if(lbl) lbl.textContent=window.t('ad_count',{n:s});
+  },100);
+};
+UI.hideAdLiveTimer=function(){
+  if(liveT){clearInterval(liveT);liveT=null;}
+  var e=document.getElementById('adLiveTimer');
+  if(e) e.remove();
 };
 
 /* ---------------- goal chip + onboarding handoff ---------------- */
