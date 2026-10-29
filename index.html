@@ -837,6 +837,7 @@ ru:{
  rew_left:"Осталось сегодня: {n}", inter_note:"Реклама показывается только между зонами",
  ad_sim:"(без SDK — реклама симулируется)",
  ad_unavailable:"Реклама недоступна — награда выдана",
+ ad_skipped:"📺 Видео закрыто раньше времени — награда не выдана. Попробуй ещё раз и досмотри до конца.",
  why_dew:"Почему роса?", empty_creatures:"Пока пусто. Сливай предметы, чтобы оживлять существ!",
  empty_quests:"Все квесты выполнены! Загляни завтра.",
  need_zone:"Нужна зона «{z}»", need_line:"Собери предмет линии «{l}» {t} ур.",
@@ -949,6 +950,7 @@ en:{
  rew_left:"Left today: {n}", inter_note:"Ads only appear between zones",
  ad_sim:"(no SDK — ad simulated)",
  ad_unavailable:"Ad unavailable — reward granted anyway",
+ ad_skipped:"📺 Video closed too early — no reward. Try again and watch it to the end.",
  why_dew:"Why dew?", empty_creatures:"Nothing here yet. Merge items to revive creatures!",
  empty_quests:"All quests done! Come back tomorrow.",
  need_zone:"Requires zone “{z}”", need_line:"Get a tier {t} “{l}” item",
@@ -1097,7 +1099,9 @@ var ECO = {
   comboWindowMs:4200, comboMax:12,
   fairDouble:true, hardcoreMul:3, hardcoreMs:24*3600*1000,
   dailyRewards:[{dew:120},{dew:150},{chest:'c'}],
-  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000}
+  /* F21: rewMinWatchMs — rewarded video counts as watched only if it was on
+     screen at least this long; closing the player earlier grants nothing */
+  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000, rewMinWatchMs:10000}
 };
 
 /* ---------------- zones ---------------- */
@@ -2564,42 +2568,63 @@ VK.adsAvailable=adsAvailable;
 VK.adAvailable=adsAvailable;   /* alias — both spellings appear in call sites */
 
 /* Rewarded video.
-   Resolves TRUE  → ad watched, grant the reward
-   Resolves FALSE → skipped / unavailable → grant the fallback (never blocks play)
-   Handles both event styles: VKWebAppRewardResult / VKWebAppRewardedResult  */
+   Resolves TRUE  → ad watched long enough → grant the reward
+   Resolves FALSE → see VK.lastRewReason:
+     'early-close:*' / 'cancelled' → user closed the player early → DO NOT grant (F21)
+     anything else (no-fill / show-failed / timeout / no-vk-env) → technical
+     failure → honest fallback, reward granted anyway (never blocks play)
+   Handles both event styles: VKWebAppShowNativeAdsResult / VKWebAppRewardedResult  */
+function minWatchMs(){
+  if(typeof VK.MIN_AD_WATCH_MS==='number') return VK.MIN_AD_WATCH_MS;   /* test hook */
+  return (window.DATA&&DATA.ECO&&DATA.ECO.ad&&DATA.ECO.ad.rewMinWatchMs)||10000;
+}
 function showRewarded(id,timeoutMs){
+  VK.lastRewReason='';
   /* outside the VK environment there is no ad transport: resolve to the
      honest fallback immediately instead of leaving a pending self-post */
   if(!VK.isInVK()){
+    VK.lastRewReason='no-vk-env';
     VK.log.push('[rewarded:'+(id||'-')+'] no-vk-env → fallback');
     return Promise.resolve(false);
   }
   var b=bridge(), settled=false, res=null, tmr=null, handler=null;
+  var t0=Date.now(), minW=minWatchMs();
   function settle(v,why){
     if(settled) return; settled=true;
+    VK.lastRewReason=why||'';
     if(tmr) clearTimeout(tmr);
     if(handler&&b&&b.unsubscribe) { try{b.unsubscribe(handler);}catch(e){} }
     VK.log.push('[rewarded:'+(id||'-')+'] '+(v?'granted':'fallback')+' '+(why||''));
     res(v,why);
   }
+  /* F21: the VK client resolves the show promise / result event when the ad
+     player CLOSES — even if the user closed it in the first second. Elapsed
+     time since the show call ≈ real watch time, so a "true" signal that
+     arrives before minW means "closed early" → no reward. */
+  function watched(kind){
+    var el=Date.now()-t0;
+    if(el>=minW) settle(true,kind+':'+el+'ms');
+    else settle(false,'early-close:'+el+'ms/'+kind);
+  }
   return new Promise(function(resolve){
     res=resolve;
-    tmr=setTimeout(function(){ settle(true,'timeout-assume-shown'); },timeoutMs||35000);
+    tmr=setTimeout(function(){ settle(true,'timeout-assume-shown'); },timeoutMs||45000);
     handler=function(e){
       var d=e&&e.detail?e.detail:e;
       if(!d||!d.type) return;
-      if(d.type==='VKWebAppShowNativeAdsResult'){ settle(true,'native-result'); }
+      if(d.type==='VKWebAppShowNativeAdsResult'){ watched('result-event'); }
       else if(d.type==='VKWebAppShowNativeAdsFailed'){ settle(false,'native-failed'); }
       /* legacy/alternate spellings some clients emit — harmless to keep: */
-      else if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ settle(true,'reward-event'); }
+      else if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ watched('reward-event'); }
       else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ settle(false,'reward-failed'); }
     };
     if(b&&b.subscribe){ try{ b.subscribe(handler); }catch(e){} }
     /* pre-check fill; only a definitive {result:false} skips the show call */
     adsAvailable('reward').then(function(ok){
       if(ok===false){ settle(false,'check-no-fill'); return; }
+      t0=Date.now();   /* measure watch time from the actual show call */
       send('VKWebAppShowNativeAds',{ad_format:'reward'})
-        .then(function(){ settle(true,'show-resolved'); })
+        .then(function(){ watched('show-resolved'); })
         .catch(function(err){
           if(cancelled(err)) settle(false,'cancelled');
           else settle(false,'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'));
@@ -3465,6 +3490,17 @@ Game.ads.watch=function(point,opts){
   opts=opts||{};
   var dewGain=(ECO.rewDew[point]||0);
   return window.VK.rewarded(point).then(function(shown){
+    var why=(window.VK.lastRewReason||'');
+    /* F21 — user closed the ad player early: no reward, daily attempt NOT consumed.
+       (Technical failures — no fill / reject / timeout — still grant the
+       fallback below, per rule 5: an SDK problem must never punish the player.) */
+    if(!shown && /^(early-close|cancelled)/.test(why)){
+      VK.log.push('[ads] '+point+' skipped ('+why+') → no reward');
+      if(window.UI&&UI.toast) UI.toast(window.t('ad_skipped'),2800);
+      if(window.AUDIO) AUDIO.sfx('bad');
+      Game.emit('adskipped',{point:point,reason:why});
+      return {shown:false,skipped:true,dew:0};
+    }
     var map={energy:'energy',chest:'chest',leg2x:'leg',energy5:'energy5'};
     G.adUse(map[point]||'total');
     if(dewGain) G.addDew(dewGain,'ad',{point:point});
@@ -3476,7 +3512,7 @@ Game.ads.watch=function(point,opts){
       UI.toast(window.t('ad_unavailable'),2600);
     }
     G.save();
-    return {shown:shown,dew:dewGain};
+    return {shown:shown,skipped:false,dew:dewGain};
   });
 };
 /* interstitial: ONLY between zones / after a boss, never during merges */
@@ -4461,7 +4497,7 @@ UI.boostModal=function(){
       {label:window.t('watch_ad'),cls:'rew',adTag:window.t('free'),onClick:function(m){
         m.close();
         UI.showAdLoader(function(){
-          Game.ads.watch('boost').then(function(){
+          Game.ads.watch('boost').then(function(r){ if(r&&r.skipped)return;
             G.S().boostEnd=Date.now()+ECO.boosterMs;
             G.save(); AUDIO.sfx('achv');
             UI.toast(window.t('boost_active',{t:U.time(ECO.boosterMs)}),'gold');
@@ -4493,7 +4529,7 @@ UI.energyModal=function(){
         if(!left){ AUDIO.sfx('bad'); UI.toast(window.t('rew_used')); return; }
         m.close();
         UI.showAdLoader(function(){
-          Game.ads.watch('energy').then(function(){
+          Game.ads.watch('energy').then(function(r){ if(r&&r.skipped)return;
             G.addEnergy(10); G.save(); AUDIO.sfx('buy');
             FX.dewFloat(window.innerWidth/2,window.innerHeight*.4,8);
             UI.toast('+'+10+' ⚡','gold'); UI.refresh({force:1});
@@ -4509,7 +4545,7 @@ UI.energyModal=function(){
         if(!Game.ads.energy5Left()){ AUDIO.sfx('bad'); UI.toast(window.t('rew_used')); return; }
         m.close();
         UI.showAdLoader(function(){
-          Game.ads.watch('energy5').then(function(){ G.addEnergy(5); G.save(); AUDIO.sfx('buy');
+          Game.ads.watch('energy5').then(function(r){ if(r&&r.skipped)return; G.addEnergy(5); G.save(); AUDIO.sfx('buy');
             UI.toast('+5 ⚡','gold'); UI.refresh({force:1}); });
         });
       }},
@@ -5049,7 +5085,7 @@ function questDetail(qi){
          {label:window.t('rew_quest2')+' ×2',cls:'rew',adTag:window.t('free'),onClick:function(m){
             m.close();
             UI.showAdLoader(function(){
-              Game.ads.watch('quest2').then(function(){ claimQuest(qi,2); });
+              Game.ads.watch('quest2').then(function(r){ if(r&&r.skipped)return; claimQuest(qi,2); });
             });
          }},
          {label:window.t('close'),cls:'dark'}]
@@ -5131,7 +5167,7 @@ function bossTab(body){
   U.$$('[data-bc]',body).forEach(function(b){ b.addEventListener('click',function(){ claimBoss(+b.dataset.bc); }); });
   U.$$('[data-bc2]',body).forEach(function(b){ b.addEventListener('click',function(){
     var z=+b.dataset.bc2;
-    UI.showAdLoader(function(){ Game.ads.watch('boss2').then(function(){ claimBoss(z,2); }); });
+    UI.showAdLoader(function(){ Game.ads.watch('boss2').then(function(r){ if(r&&r.skipped)return; claimBoss(z,2); }); });
   }); });
   U.$$('[data-bskip]',body).forEach(function(b){ b.addEventListener('click',function(){ skipBoss(+b.dataset.bskip); }); });
 }
@@ -5164,7 +5200,7 @@ function skipBoss(z){
     actions:[{label:window.t('watch_ad'),cls:'rew',adTag:window.t('free'),onClick:function(m){
       m.close();
       UI.showAdLoader(function(){
-        Game.ads.watch('skip').then(function(){ S._skip[z]=1; Game.bossSkip(z); AUDIO.sfx('achv'); UI.refresh({force:1}); });
+        Game.ads.watch('skip').then(function(r){ if(r&&r.skipped)return; S._skip[z]=1; Game.bossSkip(z); AUDIO.sfx('achv'); UI.refresh({force:1}); });
       });
     }},{label:window.t('close'),cls:'dark'}]});
 }
@@ -5777,7 +5813,7 @@ UI.freeChestModal=function(){
     actions:[{label:window.t('watch_ad'),cls:'rew',adTag:window.t('free'),onClick:function(m){
       m.close();
       UI.showAdLoader(function(){
-        Game.ads.watch('chest').then(function(){
+        Game.ads.watch('chest').then(function(r){ if(r&&r.skipped)return;
           var S=G.S(), r=U.pickW([60,30,10,0]);
           var t=['c','r','e','l'][r];
           S.chests[t]=(S.chests[t]||0)+1; G.save();
@@ -5801,7 +5837,7 @@ UI.legModal=function(){
         if(!left||S.legNext){ AUDIO.sfx('bad'); return; }
         m.close();
         UI.showAdLoader(function(){
-          Game.ads.watch('leg2x').then(function(){ G.S().legNext=true; G.save(); AUDIO.sfx('achv');
+          Game.ads.watch('leg2x').then(function(r){ if(r&&r.skipped)return; G.S().legNext=true; G.save(); AUDIO.sfx('achv');
             UI.toast('✨ '+(window.LANG==='ru'?'Легендарный шанс ×2 активен':'Legendary chance ×2 active'),'gold'); });
         });
       }},{label:window.t('close'),cls:'dark'}]});
@@ -5843,7 +5879,7 @@ UI.offlineModal=function(rep){
         claimed=true;
         mm.close();
         UI.showAdLoader(function(){
-          Game.ads.watch('offline2x').then(function(){
+          Game.ads.watch('offline2x').then(function(r){ if(r&&r.skipped)return;
             G.addDew(rep.dew+ECO.rewDew.offline,'offline2x');
             G.S().flags.offlineShown=U.dayKey(); G.S().flags.offRep=null; G.save();
             AUDIO.sfx('quest'); FX.confetti(window.innerWidth/2,window.innerHeight*.42,40);
