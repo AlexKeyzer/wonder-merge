@@ -1107,9 +1107,13 @@ var ECO = {
   dailyRewards:[{dew:120},{dew:150},{chest:'c'}],
   /* F21: rewMinWatchMs — rewarded video counts as watched only if it was on
      screen at least this long; closing the player earlier grants nothing.
+     F26: rewFraudFloorMs — anti-fraud floor for the early-close check: a
+     POSITIVE close signal in [floor, minW) means a short creative played to
+     its end (or a client that reports the show result early) → counted as
+     watched; only signals below the floor (instant close) grant nothing.
      F22: simWatchSec — outside VK the simulated ad shows a live "reward in
      N s" countdown of this length before the fallback reward is granted */
-  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000, rewMinWatchMs:10000, simWatchSec:5}
+  ad:{interCooldownMs:180000, interMinSessionMs:60000, interFirstBlockMs:60000, rewMinWatchMs:10000, rewFraudFloorMs:3000, simWatchSec:5}
 };
 
 /* ---------------- zones ---------------- */
@@ -2583,12 +2587,33 @@ VK.adAvailable=adsAvailable;   /* alias — both spellings appear in call sites 
      failure → honest fallback, reward granted anyway (never blocks play)
    Resolves TRUE via '*-after-min:*' (F24): a failure/cancel signal that arrived
      only when the finished player CLOSED (VK web quirk) after ≥ minW open.
+   Resolves TRUE via 'short-creative:*' (F26): a positive close signal (or a
+     desktop-web cancel signature) in [fraudFloor, minW) — a short creative
+     played to its end / an early client result report → full watch, reward.
    Handles both event styles: VKWebAppShowNativeAdsResult / VKWebAppRewardedResult  */
 function minWatchMs(){
   if(typeof VK.MIN_AD_WATCH_MS==='number') return VK.MIN_AD_WATCH_MS;   /* test hook */
   return (window.DATA&&DATA.ECO&&DATA.ECO.ad&&DATA.ECO.ad.rewMinWatchMs)||10000;
 }
 VK.minWatchMs=minWatchMs;   /* F21/F24: threshold for early-close detection (F25: no longer shown as a counter) */
+/* F26: anti-fraud floor. A positive "ad closed" signal that arrives in
+   [floor, minW) is NOT an early close: short reward creatives (4-6 s clips)
+   really end there and VK closes the finished modal right away, and some
+   clients report the show result early — the player watched such an ad to
+   the end and must get the reward (the complaint that led to F26). Only
+   signals below the floor (instant close, el≈0-2 s) stay "early close". */
+function fraudFloorMs(){
+  if(typeof VK.MIN_AD_FLOOR_MS==='number') return VK.MIN_AD_FLOOR_MS;   /* test hook */
+  return (window.DATA&&DATA.ECO&&DATA.ECO.ad&&DATA.ECO.ad.rewFraudFloorMs)||3000;
+}
+VK.fraudFloorMs=fraudFloorMs;
+/* F26: mobile VK clients let the user skip a rewarded video mid-play (a
+   cancel signature in [floor,minW) there is a real skip); the desktop web
+   modal only closes with the finished-ad reject/cancel signature. */
+function isMobileClient(){
+  return /Android|iPhone|iPad|iPod|Mobile|Windows Phone/i.test((window.navigator&&navigator.userAgent)||'');
+}
+VK.isMobileClient=isMobileClient;
 function showRewarded(id,timeoutMs){
   VK.lastRewReason='';
   /* outside the VK environment there is no ad transport: resolve to the
@@ -2599,7 +2624,7 @@ function showRewarded(id,timeoutMs){
     return Promise.resolve(false);
   }
   var b=bridge(), settled=false, res=null, tmr=null, handler=null;
-  var t0=Date.now(), minW=minWatchMs();
+  var t0=Date.now(), minW=minWatchMs(), floor=fraudFloorMs();   /* F26: floor */
   function settle(v,why){
     if(settled) return; settled=true;
     VK.lastRewReason=why||'';
@@ -2616,6 +2641,11 @@ function showRewarded(id,timeoutMs){
   function watched(kind){
     var el=Date.now()-t0;
     if(el>=minW) settle(true,kind+':'+el+'ms');
+    /* F26: a positive close signal in [floor,minW) = a short creative that
+       really played to its end (VK closes the finished modal at once) or a
+       client reporting the show result early → the ad WAS watched fully.
+       Below the floor it is an instant close → no reward (F21). */
+    else if(el>=floor) settle(true,'short-creative:'+el+'ms/'+kind);
     else settle(false,'early-close:'+el+'ms/'+kind);
   }
   /* F24 — a FAILURE signal that arrives after the player stayed open for
@@ -2625,9 +2655,15 @@ function showRewarded(id,timeoutMs){
      A real technical failure (no fill, blocked modal) surfaces within
      milliseconds of the show call (el≈0), so el>=minW means the video really
      played → count it as watched. Requires device re-check (V3e). */
-  function failSignal(why){
+  function failSignal(why,err){
     var el=Date.now()-t0;
     if(el>=minW) settle(true,why+'-after-min:'+el+'ms');
+    /* F26: a cancel/close signature in [floor,minW): on the desktop web the
+       FINISHED short modal closes with exactly this signature → count it as
+       watched; on mobile clients the same signature in this window is a real
+       mid-ad skip → no reward. Non-cancel failures here stay technical →
+       the game layer grants the honest fallback (rule 5). */
+    else if(el>=floor && !isMobileClient() && cancelled(err)) settle(true,'short-creative-after-fail:'+el+'ms/'+why);
     else settle(false,why);
   }
   return new Promise(function(resolve){
@@ -2637,10 +2673,10 @@ function showRewarded(id,timeoutMs){
       var d=e&&e.detail?e.detail:e;
       if(!d||!d.type) return;
       if(d.type==='VKWebAppShowNativeAdsResult'){ watched('result-event'); }
-      else if(d.type==='VKWebAppShowNativeAdsFailed'){ failSignal('native-failed'); }
+      else if(d.type==='VKWebAppShowNativeAdsFailed'){ failSignal('native-failed',d); }   /* F26: pass signature */
       /* legacy/alternate spellings some clients emit — harmless to keep: */
       else if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ watched('reward-event'); }
-      else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ failSignal('reward-failed'); }
+      else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ failSignal('reward-failed',d); }
     };
     if(b&&b.subscribe){ try{ b.subscribe(handler); }catch(e){} }
     /* pre-check fill; only a definitive {result:false} skips the show call */
@@ -2655,7 +2691,7 @@ function showRewarded(id,timeoutMs){
           /* F24: a reject that arrives AFTER a full open period (VK web closes
              the finished modal with a reject/cancel signature) is a watch,
              not a failure — failSignal decides by elapsed time. */
-          failSignal(cancelled(err)?'cancelled':'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'));
+          failSignal(cancelled(err)?'cancelled':'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'),err);
         });
     });
   });
