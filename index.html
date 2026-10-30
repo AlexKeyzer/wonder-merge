@@ -2587,6 +2587,8 @@ VK.adAvailable=adsAvailable;   /* alias — both spellings appear in call sites 
      'early-close:*' / 'cancelled' → user closed the player early → DO NOT grant (F21)
      anything else (no-fill / show-failed / timeout / no-vk-env) → technical
      failure → honest fallback, reward granted anyway (never blocks play)
+   Resolves TRUE via '*-after-min:*' (F24): a failure/cancel signal that arrived
+     only when the finished player CLOSED (VK web quirk) after ≥ minW open.
    Handles both event styles: VKWebAppShowNativeAdsResult / VKWebAppRewardedResult  */
 function minWatchMs(){
   if(typeof VK.MIN_AD_WATCH_MS==='number') return VK.MIN_AD_WATCH_MS;   /* test hook */
@@ -2622,6 +2624,18 @@ function showRewarded(id,timeoutMs){
     if(el>=minW) settle(true,kind+':'+el+'ms');
     else settle(false,'early-close:'+el+'ms/'+kind);
   }
+  /* F24 — a FAILURE signal that arrives after the player stayed open for
+     >= minW: on VK web the show promise / Failed event can fire when the
+     FINISHED ad modal CLOSES, so a full watch looks like a failure and the
+     player got two contradictory toasts ("ad watched +100" + "ad unavailable").
+     A real technical failure (no fill, blocked modal) surfaces within
+     milliseconds of the show call (el≈0), so el>=minW means the video really
+     played → count it as watched. Requires device re-check (V3e). */
+  function failSignal(why){
+    var el=Date.now()-t0;
+    if(el>=minW) settle(true,why+'-after-min:'+el+'ms');
+    else settle(false,why);
+  }
   return new Promise(function(resolve){
     res=resolve;
     tmr=setTimeout(function(){ settle(true,'timeout-assume-shown'); },timeoutMs||45000);
@@ -2629,10 +2643,10 @@ function showRewarded(id,timeoutMs){
       var d=e&&e.detail?e.detail:e;
       if(!d||!d.type) return;
       if(d.type==='VKWebAppShowNativeAdsResult'){ watched('result-event'); }
-      else if(d.type==='VKWebAppShowNativeAdsFailed'){ settle(false,'native-failed'); }
+      else if(d.type==='VKWebAppShowNativeAdsFailed'){ failSignal('native-failed'); }
       /* legacy/alternate spellings some clients emit — harmless to keep: */
       else if(d.type==='VKWebAppRewardResult'||d.type==='VKWebAppRewardedResult'){ watched('reward-event'); }
-      else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ settle(false,'reward-failed'); }
+      else if(d.type==='VKWebAppRewardFailed'||d.type==='VKWebAppRewardedFailed'){ failSignal('reward-failed'); }
     };
     if(b&&b.subscribe){ try{ b.subscribe(handler); }catch(e){} }
     /* pre-check fill; only a definitive {result:false} skips the show call */
@@ -2643,8 +2657,10 @@ function showRewarded(id,timeoutMs){
       send('VKWebAppShowNativeAds',{ad_format:'reward'})
         .then(function(){ watched('show-resolved'); })
         .catch(function(err){
-          if(cancelled(err)) settle(false,'cancelled');
-          else settle(false,'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'));
+          /* F24: a reject that arrives AFTER a full open period (VK web closes
+             the finished modal with a reject/cancel signature) is a watch,
+             not a failure — failSignal decides by elapsed time. */
+          failSignal(cancelled(err)?'cancelled':'show-failed:'+((err&&(err.error_type||err.error_msg))||'?'));
         });
     });
   });
@@ -3532,7 +3548,9 @@ Game.ads.watch=function(point,opts){
     /* F20b — honesty: inside VK, if the ad didn't actually play (no fill /
        offer not connected / rejected), say so; the reward is granted anyway (rule 5) */
     if(!shown && window.VK.isInVK() && window.UI && UI.toast){
-      UI.toast(window.t('ad_unavailable'),2600);
+      /* F24: the fallback toast is now the ONLY message — include the amount
+         so the player sees what landed (the "watched" toast stays silent). */
+      UI.toast(window.t('ad_unavailable')+(dewGain?' · +'+U.num(dewGain)+' 💧':''),2600);
     }
     G.save();
     return {shown:shown,skipped:false,dew:dewGain};
@@ -6095,6 +6113,11 @@ Game.on('achv',function(d){
 Game.on('level',function(){});
 Game.on('zoneopen',function(){});
 Game.on('adreward',function(d){
+  /* F24 — inside VK a technical no-show already raises the honest
+     "ad unavailable — reward granted" toast in Game.ads.watch; stacking the
+     "ad watched" toast on top of it contradicts itself (players saw both).
+     Outside VK there is no ad transport at all — keep the friendly toast. */
+  if(d.shown===false && window.VK && VK.isInVK()) return;
   UI.toast('📺 '+window.t('rew_granted')+' · +'+U.num(d.dew)+' 💧',2200,'blue');
 });
 Game.on('feed',function(){});
