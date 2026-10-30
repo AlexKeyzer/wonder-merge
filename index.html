@@ -2590,6 +2590,11 @@ VK.adAvailable=adsAvailable;   /* alias — both spellings appear in call sites 
    Resolves TRUE via 'short-creative:*' (F26): a positive close signal (or a
      desktop-web cancel signature) in [fraudFloor, minW) — a short creative
      played to its end / an early client result report → full watch, reward.
+   F27: a cancel/close signature BELOW minW — and ANY failure-like signature
+     in [fraudFloor, minW) — is the PLAYER closing early, on every channel
+     (show-promise reject and the VKWebAppShowNativeAdsFailed mirror event
+     alike): no reward, honest toast. Only faults at el≈0 (show-time no-fill /
+     load errors) stay technical → rule-5 fallback grant.
    Handles both event styles: VKWebAppShowNativeAdsResult / VKWebAppRewardedResult  */
 function minWatchMs(){
   if(typeof VK.MIN_AD_WATCH_MS==='number') return VK.MIN_AD_WATCH_MS;   /* test hook */
@@ -2657,14 +2662,31 @@ function showRewarded(id,timeoutMs){
      played → count it as watched. Requires device re-check (V3e). */
   function failSignal(why,err){
     var el=Date.now()-t0;
+    var canc=cancelled(err);   /* F27: read the signature from ANY channel */
+    var sig=String((err&&(err.error_type||err.error_code||err.error_msg))||'');
     if(el>=minW) settle(true,why+'-after-min:'+el+'ms');
     /* F26: a cancel/close signature in [floor,minW): on the desktop web the
        FINISHED short modal closes with exactly this signature → count it as
        watched; on mobile clients the same signature in this window is a real
-       mid-ad skip → no reward. Non-cancel failures here stay technical →
-       the game layer grants the honest fallback (rule 5). */
-    else if(el>=floor && !isMobileClient() && cancelled(err)) settle(true,'short-creative-after-fail:'+el+'ms/'+why);
-    else settle(false,why);
+       mid-ad skip → no reward (branch below). */
+    else if(el>=floor && !isMobileClient() && canc) settle(true,'short-creative-after-fail:'+el+'ms/'+why);
+    /* F27: a cancel/close signature BELOW the window means the PLAYER closed
+       the player early — no matter which channel reported it (show-promise
+       reject OR the VKWebAppShowNativeAdsFailed mirror event) and no matter
+       the platform. Before F27 the event channel kept the hardcoded channel
+       name ('native-failed'/'reward-failed') as the settle reason, the game
+       layer read it as a technical SDK fault (rule 5) and GRANTED the reward
+       with the "ad unavailable — reward granted" toast on a real skip. */
+    else if(canc) settle(false,'cancelled@'+el+'ms/'+why+(sig?'/'+sig:''));
+    /* F27: a NON-cancel failure signature that arrives only after the modal
+       stayed open for >= floor ms is in practice the player closing the
+       player with a client-specific signature: real no-fill / load faults
+       reject within milliseconds of the show call (el≈0, branch below).
+       Settle it as an early close → honest "ad not watched", no reward. */
+    else if(el>=floor) settle(false,'early-close@'+el+'ms/'+why+(sig?'/'+sig:''));
+    /* el<floor and no cancel signature → genuine technical failure at show
+       time → the game layer grants the honest fallback (rule 5). */
+    else settle(false,why+(sig?'/'+sig:''));
   }
   return new Promise(function(resolve){
     res=resolve;
